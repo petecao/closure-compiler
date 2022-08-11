@@ -54,8 +54,8 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
   }
 
   @Test
-  public void testCannotConvertYet() {
-    testError(
+  public void testThisSuperStaticBlocks() {
+    test(
         lines(
             "class C {", //
             "  static {",
@@ -63,24 +63,48 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
             "    this.y = x",
             "  }",
             "}"),
-        /*lines(
-        "class C {}", //
-        "{",
-        "  let x = 2;",
-        "  C.y = x", // TODO(b/235871861): Need to correct references to `this`
-        "}")*/
-        TranspilationUtil.CANNOT_CONVERT_YET); // uses `this`
-
-    testError(
         lines(
-            "class C extends B{", //
+            "class C {}", //
+            "{",
+            "  let x = 2;",
+            "  C.y = x",
+            "}"));
+
+    test(
+        lines(
+            "let y = 1;",
+            "class C {", //
+            "  static {",
+            "    let x = 2",
+            "    this[y] = x",
+            "  }",
+            "}"),
+        lines(
+            "let y = 1;",
+            "class C {}", //
+            "{",
+            "  let x = 2;",
+            "  C[y] = x",
+            "}"));
+
+    test(
+        lines(
+            "class B {}",
+            "B.y = 2;",
+            "class C extends B {", //
             "  static {",
             "    let x = super.y",
             "  }",
             "}"),
-        TranspilationUtil.CANNOT_CONVERT_YET); // uses `super`
+        lines(
+            "class B {}",
+            "B.y = 2;",
+            "class C extends B {}", //
+            "{",
+            "  let x = B.y",
+            "}"));
 
-    testError(
+    test(
         lines(
             "class C {", //
             "  static {",
@@ -88,14 +112,33 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
             "    const y = this.x",
             "  }",
             "}"),
-        /*lines(
-        "class C {}", //
-        "{",
-        "  C.x = 2;",
-        "  const y = C.x",
-        "}")*/
-        TranspilationUtil.CANNOT_CONVERT_YET); // not class decl
+        lines(
+            "class C {}", //
+            "{",
+            "  C.x = 2;",
+            "  const y = C.x",
+            "}"));
 
+    test(
+        lines(
+            "let x = 2;",
+            "class C {", //
+            "  static {",
+            "    C[x] = 2",
+            "    const y = this[x]",
+            "  }",
+            "}"),
+        lines(
+            "let x = 2;",
+            "class C {}", //
+            "{",
+            "  C[x] = 2;",
+            "  const y = C[x]",
+            "}"));
+  }
+
+  @Test
+  public void testThisSuperStaticFields() {
     testError(
         lines(
             "class C {", //
@@ -103,14 +146,6 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
             "  static y = this.x;",
             "}"),
         TranspilationUtil.CANNOT_CONVERT_YET); // `this` in static field
-
-    testError(
-        lines(
-            "class C {", //
-            "  x = 1;",
-            "  y = this.x;",
-            "}"),
-        TranspilationUtil.CANNOT_CONVERT_YET); // `this` in public field
 
     test(
         srcs(
@@ -121,30 +156,84 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
                 "}")),
         error(TranspilationUtil.CANNOT_CONVERT_YET)); // use of `this`
 
+    testError(
+        lines(
+            "class C {", //
+            "  static [1] = 1;",
+            "  static [2] = this[1];",
+            "}"),
+        TranspilationUtil.CANNOT_CONVERT_YET); // use of `this`
+  }
+
+  @Test
+  public void testTestSuperInstanceFields() {
     test(
-        srcs(
-            lines(
-                "class C {", //
-                "  [1] = 1;",
-                "  [2] = this[1];",
-                "}")),
-        error(TranspilationUtil.CANNOT_CONVERT_YET)); // use of `this`
+        lines(
+            "class C {", //
+            "  x = 1;",
+            "  y = this.x;",
+            "}"),
+        lines(
+            "class C {", //
+            "  $jscomp$mem$func$name$m1146332801$0() {",
+            "    this.x = 1;",
+            "    this.y = this.x;",
+            "  }",
+            "  constructor() {",
+            "    this.$jscomp$mem$func$name$m1146332801$0();",
+            "  }",
+            "}"));
 
     test(
-        srcs(
-            lines(
-                "let c = class {", //
-                "  x = 1",
-                "  y = this.x",
-                "}",
-                "class B {",
-                "  [1] = 2;",
-                "  [2] = this[1]",
-                "}" // testing that the correct number of diagnostics are thrown
-                )),
-        error(TranspilationUtil.CANNOT_CONVERT_YET),
-        error(TranspilationUtil.CANNOT_CONVERT_YET));
+        lines(
+            "class C {", //
+            "  [1] = 1;",
+            "  [2] = this[1];",
+            "}"),
+        lines(
+            "class C {", //
+            "  $jscomp$mem$func$name$m1146332801$0() {",
+            "    this[1] = 1;",
+            "    this[2] = this[1];",
+            "  }",
+            "  constructor() {",
+            "    this.$jscomp$mem$func$name$m1146332801$0();",
+            "  }",
+            "}")); // use of `this`
+
+    test(
+        lines(
+            "let c = class {", //
+            "  x = 1",
+            "  y = this.x",
+            "}",
+            "class B {",
+            "  [1] = 2;",
+            "  [2] = this[1]",
+            "}"),
+        lines(
+            "let c = class {", //
+            "  $jscomp$mem$func$name$m1146332801$0() {",
+            "    this.x = 1;",
+            "    this.y = this.x;",
+            "  }",
+            "  constructor() {",
+            "    this.$jscomp$mem$func$name$m1146332801$0();",
+            "  }",
+            "}",
+            "class B {", //
+            "  $jscomp$mem$func$name$m1146332801$1() {",
+            "    this[1] = 1;",
+            "    this[2] = this[1];",
+            "  }",
+            "  constructor() {",
+            "    this.$jscomp$mem$func$name$m1146332801$1();",
+            "  }",
+            "}"));
   }
+
+  @Test
+  public void testLHSThisSuper() {}
 
   @Test
   public void testClassStaticBlocksNoFieldAssign() {
@@ -268,15 +357,14 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
             "class C {", //
             "  static {",
             "    C.x = 2",
-            // "    const y = C.x", //TODO(b/235871861) blocked on typechecking, gets
-            // JSC_INEXISTENT_PROPERTY
+            "    const y = C.x",
             "  }",
             "}"),
         lines(
             "class C {}", //
             "{",
             "  C.x = 2;",
-            // "  const y = C.x",
+            "  const y = C.x",
             "}"));
 
     test(
@@ -1285,6 +1373,17 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
             "/** @unrestricted */", //
             "class C {", //
             "  static [1] = 2",
+            "  static [2]() {}",
+            "}"),
+        lines(
+            "class C {static [2]() {}}", //
+            "C[1] = 2;"));
+
+    test(
+        lines(
+            "/** @unrestricted */", //
+            "class C {", //
+            "  static [1] = 2",
             "  static {let y = C[1]}",
             "}"),
         lines(
@@ -1294,7 +1393,7 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
   }
 
   @Test
-  public void testInstanceComputedNoConstructor() {
+  public void testInstanceComputedNoSideEffects() {
     test(
         lines(
             "/** @unrestricted */", //
@@ -1447,6 +1546,28 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
             "    this[2] = 2;",
             "  }",
             "  foo() {}",
+            "  constructor() {",
+            "    this.$jscomp$mem$func$name$m1146332801$0();",
+            "    this[3] = 3;",
+            "  }",
+            "}"));
+
+    test(
+        lines(
+            "/** @unrestricted */", //
+            "class C {", //
+            "  [1] = 1;",
+            "  [2]() {}",
+            "  constructor() {",
+            "    this[3] = 3;",
+            "  }",
+            "}"),
+        lines(
+            "class C {", //
+            "  $jscomp$mem$func$name$m1146332801$0() {",
+            "    this[1] = 1;",
+            "  }",
+            "  [2]() {}",
             "  constructor() {",
             "    this.$jscomp$mem$func$name$m1146332801$0();",
             "    this[3] = 3;",
@@ -2088,6 +2209,271 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
   }
 
   @Test
+  public void testNonClassDeclarationsStaticImpureComputed() {
+    test(
+        lines(
+            "function f() {}",
+            "/** @unrestricted */",
+            "let c = class {", //
+            "  static [f()] = 1",
+            "}"),
+        lines(
+            "function f() {}", //
+            "const $jscomp$comp$key$tmp$m1146332801$0 = f();",
+            "let c = class {}",
+            "c[$jscomp$comp$key$tmp$m1146332801$0] = 1"));
+
+    test(
+        lines(
+            "function f() {}",
+            "class A {}",
+            "/** @unrestricted */",
+            "A.c = class {", //
+            "  static [f()] = 1",
+            "}"),
+        lines(
+            "function f() {}", //
+            "class A {}",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = f();",
+            "A.c = class {}",
+            "A.c[$jscomp$comp$key$tmp$m1146332801$0] = 1"));
+
+    test(
+        lines(
+            "function f() {}",
+            "class A {}",
+            "/** @unrestricted */",
+            "A[1] = class {", //
+            "  static [f()] = 1",
+            "}"),
+        lines(
+            "function f() {}", //
+            "class A {}",
+            "A[1] =",
+            "(() => {",
+            "const $jscomp$comp$key$tmp$m1146332801$1 = f();",
+            "class $jscomp$class$name$m1146332801$0 {}",
+            "$jscomp$class$name$m1146332801$0[$jscomp$comp$key$tmp$m1146332801$1] = 1;",
+            "return $jscomp$class$name$m1146332801$0 })()"));
+  }
+
+  @Test
+  public void testNonClassDeclarationsInstanceImpureComputed() {
+    test(
+        lines(
+            "function f() {}",
+            "foo(",
+            "/** @unrestricted */",
+            "class {", //
+            "  [f()] = 1",
+            "})"),
+        lines(
+            "function f() {}",
+            "foo(",
+            "(() => {",
+            "  const $jscomp$comp$key$tmp$m1146332801$1 = f();",
+            "  class $jscomp$class$name$m1146332801$0 {", //
+            "    $jscomp$mem$func$name$m1146332801$2() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$1] = 1;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$2();",
+            "    }",
+            "  }",
+            "  return $jscomp$class$name$m1146332801$0;",
+            "})()",
+            ")"));
+
+    test(
+        lines(
+            "function f() {}",
+            "/** @unrestricted */",
+            "let c = class {", //
+            "  [f()] = 1",
+            "}"),
+        lines(
+            "function f() {}",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = f();",
+            "let c = class {", //
+            "    $jscomp$mem$func$name$m1146332801$1() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$0] = 1;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$1();",
+            "    }",
+            "}"));
+
+    test(
+        lines(
+            "function f() {}",
+            "/** @unrestricted */",
+            "let c = class C {", //
+            "  [f()] = 1",
+            "}"),
+        lines(
+            "function f() {}",
+            "let c =",
+            "(() => {",
+            "  const $jscomp$comp$key$tmp$m1146332801$0 = f();",
+            "  class C {", //
+            "    $jscomp$mem$func$name$m1146332801$1() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$0] = 1;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$1();",
+            "    }",
+            "  }",
+            "  return C;",
+            "})()"));
+
+    test(
+        lines(
+            "function f() {}",
+            "class A {}",
+            "/** @unrestricted */",
+            "A.c = class {", //
+            "  [f()] = 1",
+            "}"),
+        lines(
+            "function f() {}",
+            "class A {}",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = f();",
+            "A.c = class {", //
+            "    $jscomp$mem$func$name$m1146332801$1() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$0] = 1;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$1();",
+            "    }",
+            "}"));
+
+    test(
+        lines(
+            "function f() {}",
+            "class A {}",
+            "/** @unrestricted */",
+            "A.c = class C {", //
+            "  [f()] = 1",
+            "}"),
+        lines(
+            "function f() {}",
+            "class A {}",
+            "A.c =",
+            "(() => {",
+            "  const $jscomp$comp$key$tmp$m1146332801$0 = f();",
+            "  class C {", //
+            "    $jscomp$mem$func$name$m1146332801$1() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$0] = 1;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$1();",
+            "    }",
+            "  }",
+            "  return C;",
+            "})()"));
+
+    test(
+        lines(
+            "function f() {}",
+            "class A {}",
+            "/** @unrestricted */",
+            "A[1] = class {", //
+            "  [f()] = 1",
+            "}"),
+        lines(
+            "function f() {}",
+            "class A {}",
+            "A[1]=",
+            "(() => {",
+            "  const $jscomp$comp$key$tmp$m1146332801$1 = f();",
+            "  class $jscomp$class$name$m1146332801$0 {", //
+            "    $jscomp$mem$func$name$m1146332801$2() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$1] = 1;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$2();",
+            "    }",
+            "  }",
+            "  return $jscomp$class$name$m1146332801$0;",
+            "})()"));
+
+    test(
+        lines(
+            "function f() {}",
+            "class A {}",
+            "/** @unrestricted */",
+            "A[1] = class C {", //
+            "  [f()] = 1",
+            "}"),
+        lines(
+            "function f() {}",
+            "class A {}",
+            "A[1] =",
+            "(() => {",
+            "  const $jscomp$comp$key$tmp$m1146332801$0 = f();",
+            "  class C {", //
+            "    $jscomp$mem$func$name$m1146332801$1() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$0] = 1;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$1();",
+            "    }",
+            "  }",
+            "  return C;",
+            "})()"));
+
+    test(
+        lines(
+            "function f() {}",
+            "class A {}",
+            "/** @unrestricted */",
+            "A[f()] = class {", //
+            "  [f()] = 1",
+            "}"),
+        lines(
+            "function f() {}",
+            "class A {}",
+            "A[f()]=",
+            "(() => {",
+            "  const $jscomp$comp$key$tmp$m1146332801$1 = f();",
+            "  class $jscomp$class$name$m1146332801$0 {", //
+            "    $jscomp$mem$func$name$m1146332801$2() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$1] = 1;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$2();",
+            "    }",
+            "  }",
+            "  return $jscomp$class$name$m1146332801$0;",
+            "})()"));
+
+    test(
+        lines(
+            "function f() {}",
+            "foo(",
+            "/** @unrestricted */",
+            "class C {", //
+            "  [f()] = 1",
+            "})"),
+        lines(
+            "function f() {}",
+            "foo(",
+            "(() => {",
+            "  const $jscomp$comp$key$tmp$m1146332801$0 = f();",
+            "  class C {", //
+            "    $jscomp$mem$func$name$m1146332801$1() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$0] = 1;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$1();",
+            "    }",
+            "  }",
+            "  return C;",
+            "})()",
+            ")"));
+  }
+
+  @Test
   public void testIIFEClassesWithStaticMembers() {
     test(
         lines(
@@ -2176,7 +2562,8 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
             "  x = C.y",
             "})"),
         lines(
-            "foo((() => {",
+            "foo(",
+            "(() => {",
             "  class C {", //
             "    $jscomp$mem$func$name$m1146332801$0() {",
             "      this.x = C.y;",
@@ -2187,7 +2574,8 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
             "  }",
             "  C.y = 2;",
             "  return C;",
-            "})())"));
+            "})()",
+            ")"));
 
     test(
         lines(
@@ -2675,6 +3063,192 @@ public final class RewriteClassMembersTest extends CompilerTestCase {
             "      function f() { return 'str'; }",
             "    }",
             "}"));
+  }
+
+  @Test
+  public void testComputedInstanceFieldsWithSideEffects() {
+    test(
+        lines(
+            "var x = 2", //
+            "/** @unrestricted */", //
+            "class C {[x] = 2;}"),
+        lines(
+            "var x = 2;",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = x;",
+            "class C {",
+            "    $jscomp$mem$func$name$m1146332801$1() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$0] = 2;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$1();",
+            "    }",
+            "}"));
+
+    test(
+        lines(
+            "var x = 2", //
+            "/** @unrestricted */", //
+            "class C {[2 * x + 2] = 2;}"),
+        lines(
+            "var x = 2;",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = 2 * x + 2;",
+            "class C {",
+            "    $jscomp$mem$func$name$m1146332801$1() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$0] = 2;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$1();",
+            "    }",
+            "}"));
+
+    test(
+        lines(
+            "function f(x) {return 2;}", //
+            "/** @unrestricted */", //
+            "class C {[f(1) + f(2)] = 2;}"),
+        lines(
+            "function f(x) {return 2;}",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = f(1) + f(2);",
+            "class C {",
+            "    $jscomp$mem$func$name$m1146332801$1() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$0] = 2;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$1();",
+            "    }",
+            "}"));
+
+    test(
+        lines(
+            "function f(x) {return 2;}", //
+            "let x = 2;",
+            "/** @unrestricted */", //
+            "class C {",
+            "  [f(1) + f(2)] = 2;",
+            "  [f(x) + x] = 3;",
+            "  [2 + x] = 4;",
+            "}"),
+        lines(
+            "function f(x) {return 2;}",
+            "let x = 2;",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = f(1) + f(2);",
+            "const $jscomp$comp$key$tmp$m1146332801$1 = f(x) + x;",
+            "const $jscomp$comp$key$tmp$m1146332801$2 = 2 + x;",
+            "class C {",
+            "    $jscomp$mem$func$name$m1146332801$3() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$0] = 2;",
+            "      this[$jscomp$comp$key$tmp$m1146332801$1] = 3;",
+            "      this[$jscomp$comp$key$tmp$m1146332801$2] = 4;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$3();",
+            "    }",
+            "}"));
+
+    test(
+        lines(
+            "function f(x) {return 2;}", //
+            "let x = 2;",
+            "/** @unrestricted */", //
+            "class C {",
+            "  [f(1) + f(2)]() {};",
+            "  [f(x) + x] = 3;",
+            "  [2 + x](x) {};",
+            "}"),
+        lines(
+            "function f(x) {return 2;}",
+            "let x = 2;",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = f(1) + f(2);",
+            "const $jscomp$comp$key$tmp$m1146332801$1 = f(x) + x;",
+            "const $jscomp$comp$key$tmp$m1146332801$2 = 2 + x;",
+            "class C {",
+            "    $jscomp$mem$func$name$m1146332801$3() {",
+            "      this[$jscomp$comp$key$tmp$m1146332801$1] = 3;",
+            "    }",
+            "    constructor() {",
+            "      this.$jscomp$mem$func$name$m1146332801$3();",
+            "    }",
+            "  [$jscomp$comp$key$tmp$m1146332801$0]() {};",
+            "  [$jscomp$comp$key$tmp$m1146332801$2](x) {};",
+            "}"));
+  }
+
+  @Test
+  public void testComputedStaticFieldsWithSideEffects() {
+    test(
+        lines(
+            "var x = 2", //
+            "/** @unrestricted */", //
+            "class C {static [x] = 2;}"),
+        lines(
+            "var x = 2;",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = x;",
+            "class C {}",
+            "C[$jscomp$comp$key$tmp$m1146332801$0] = 2;"));
+
+    test(
+        lines(
+            "var x = 2", //
+            "/** @unrestricted */", //
+            "class C {static [2 * x + 2] = 2;}"),
+        lines(
+            "var x = 2;",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = 2 * x + 2;",
+            "class C {}",
+            "C[$jscomp$comp$key$tmp$m1146332801$0] = 2;"));
+
+    test(
+        lines(
+            "function f(x) {return 2;}", //
+            "/** @unrestricted */", //
+            "class C {static [f(1) + f(2)] = 2;}"),
+        lines(
+            "function f(x) {return 2;}",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = f(1) + f(2);",
+            "class C {}",
+            "C[$jscomp$comp$key$tmp$m1146332801$0] = 2;"));
+
+    test(
+        lines(
+            "function f(x) {return 2;}", //
+            "let x = 2;",
+            "/** @unrestricted */", //
+            "class C {",
+            "  static [f(1) + f(2)] = 2;",
+            "  static [f(x) + x] = 3;",
+            "  static [2 + x] = 4;",
+            "}"),
+        lines(
+            "function f(x) {return 2;}",
+            "let x = 2;",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = f(1) + f(2);",
+            "const $jscomp$comp$key$tmp$m1146332801$1 = f(x) + x;",
+            "const $jscomp$comp$key$tmp$m1146332801$2 = 2 + x;",
+            "class C {}",
+            "C[$jscomp$comp$key$tmp$m1146332801$0] = 2;",
+            "C[$jscomp$comp$key$tmp$m1146332801$1] = 3;",
+            "C[$jscomp$comp$key$tmp$m1146332801$2] = 4;"));
+    test(
+        lines(
+            "function f(x) {return 2;}", //
+            "let x = 2;",
+            "/** @unrestricted */", //
+            "class C {",
+            "  static [f(1) + f(2)]() {};",
+            "  static [f(x) + x] = 3;",
+            "  [2 + x](x) {};",
+            "}"),
+        lines(
+            "function f(x) {return 2;}",
+            "let x = 2;",
+            "const $jscomp$comp$key$tmp$m1146332801$0 = f(1) + f(2);",
+            "const $jscomp$comp$key$tmp$m1146332801$1 = f(x) + x;",
+            "const $jscomp$comp$key$tmp$m1146332801$2 = 2 + x;",
+            "class C {",
+            "  static [$jscomp$comp$key$tmp$m1146332801$0]() {};",
+            "  [$jscomp$comp$key$tmp$m1146332801$2](x) {};",
+            "}",
+            "C[$jscomp$comp$key$tmp$m1146332801$1] = 3;"));
   }
 
   @Test
