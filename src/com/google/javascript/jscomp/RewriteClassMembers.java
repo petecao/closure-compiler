@@ -16,6 +16,7 @@
 package com.google.javascript.jscomp;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
 import com.google.javascript.jscomp.parsing.parser.FeatureSet;
@@ -23,19 +24,27 @@ import com.google.javascript.jscomp.parsing.parser.FeatureSet.Feature;
 import com.google.javascript.rhino.Node;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.HashSet;
+import java.util.Set;
 import javax.annotation.Nullable;
 
 /** Replaces the ES2022 class fields and class static blocks with constructor declaration. */
 public final class RewriteClassMembers implements NodeTraversal.Callback, CompilerPass {
 
+  private static final String TEMP_MEM_FUNC_NAME = "$jscomp$mem$func$name$";
+  private static final String TEMP_CLASS_NAME = "$jscomp$class$name$";
+  private static final String TEMP_COMP_KEY = "$jscomp$comp$key$tmp$";
+
   private final AbstractCompiler compiler;
   private final AstFactory astFactory;
+  private final UniqueIdSupplier uniqueIdSupplier;
   private final SynthesizeExplicitConstructors ctorCreator;
   private final Deque<ClassRecord> classStack;
 
   public RewriteClassMembers(AbstractCompiler compiler) {
     this.compiler = compiler;
     this.astFactory = compiler.createAstFactory();
+    this.uniqueIdSupplier = compiler.getUniqueIdSupplier();
     this.ctorCreator = new SynthesizeExplicitConstructors(compiler);
     this.classStack = new ArrayDeque<>();
   }
@@ -56,45 +65,30 @@ public final class RewriteClassMembers implements NodeTraversal.Callback, Compil
             || scriptFeatures.contains(Feature.PUBLIC_CLASS_FIELDS)
             || scriptFeatures.contains(Feature.CLASS_STATIC_BLOCK);
       case CLASS:
+        putClassInIIFE(t, n); // need to do this before rewriting
         Node classNameNode = NodeUtil.getNameNode(n);
-
-        if (classNameNode == null) {
-          t.report(
-              n, TranspilationUtil.CANNOT_CONVERT_YET, "Anonymous classes with ES2022 features");
-          return false;
-        }
-
-        @Nullable Node classInsertionPoint = getStatementDeclaringClass(n, classNameNode);
-
-        if (classInsertionPoint == null) {
-          t.report(
-              n,
-              TranspilationUtil.CANNOT_CONVERT_YET,
-              "Class in a non-extractable location with ES2022 features");
-          return false;
-        }
-
-        if (!n.getFirstChild().isEmpty()
-            && !classNameNode.matchesQualifiedName(n.getFirstChild())) {
-          // we do not allow `let x = class C {}` where the names inside the class can be shadowed
-          // at this time
-          t.report(n, TranspilationUtil.CANNOT_CONVERT_YET, "Classes with possible name shadowing");
-          return false;
-        }
-
+        Node classInsertionPoint = getStatementDeclaringClass(n, classNameNode);
         classStack.push(new ClassRecord(n, classNameNode.getQualifiedName(), classInsertionPoint));
         break;
       case COMPUTED_FIELD_DEF:
         checkState(!classStack.isEmpty());
-        t.report(n, TranspilationUtil.CANNOT_CONVERT_YET, "Computed fields");
-        classStack.peek().cannotConvert = true;
-        return false;
+        moveImpureComputedNames(
+            n,
+            classStack.peek().classNode,
+            t); // want to move this first so we can get the proper name substitution in the
+        // computed prop
+        if (!n.isStaticMember() && n.getSecondChild() != null) {
+          NodeUtil.visitPreOrder(n.getSecondChild(), classStack.peek());
+        }
+        classStack.peek().recordField(n);
+        break;
+      case COMPUTED_PROP:
+        moveImpureComputedNames(n, classStack.peek().classNode, t);
+        break;
       case MEMBER_FIELD_DEF:
         checkState(!classStack.isEmpty());
-        if (NodeUtil.referencesEnclosingReceiver(n)) {
-          t.report(n, TranspilationUtil.CANNOT_CONVERT_YET, "Member references this or super");
-          classStack.peek().cannotConvert = true;
-          break;
+        if (!n.isStaticMember() && n.getFirstChild() != null) {
+          NodeUtil.visitPreOrder(n.getFirstChild(), classStack.peek());
         }
         classStack.peek().recordField(n);
         break;
@@ -116,6 +110,42 @@ public final class RewriteClassMembers implements NodeTraversal.Callback, Compil
     return true;
   }
 
+  /**
+   * Moves all classes that do not have an extraction point for members or with conflicting class
+   * names (let c = class C {}) into an IIFE
+   *
+   * <p>This method was chosen for its correctness and ease of implementation, but at the cost of
+   * better optimizations
+   *
+   * <p>TODO(b/189993301, b/240443227): Explore other methods to improve optimizability
+   */
+  private void putClassInIIFE(NodeTraversal t, Node classNode) {
+    Node classMembersExtractionNode =
+        getStatementDeclaringClass(classNode, NodeUtil.getNameNode(classNode));
+    if (classMembersExtractionNode != null // classes where we can extract members and where
+        && (classNode.getFirstChild().isEmpty() // their names are consistent don't need to be moved
+            || NodeUtil.getNameNode(classNode).matchesQualifiedName(classNode.getFirstChild()))) {
+      return;
+    }
+    Node innerClassNameNode = classNode.getFirstChild();
+    if (innerClassNameNode.isEmpty()) {
+      CompilerInput input = t.getInput();
+      String newClassName = TEMP_CLASS_NAME + uniqueIdSupplier.getUniqueId(input);
+      Node newClassNameNode = astFactory.createName(newClassName, AstFactory.type(classNode));
+      innerClassNameNode.replaceWith(newClassNameNode);
+      innerClassNameNode = newClassNameNode;
+    }
+    Node returnClass = astFactory.createReturn(innerClassNameNode.cloneNode());
+    Node iifeBlock = astFactory.createBlock(returnClass);
+    Node iife = astFactory.createZeroArgArrowFunctionForExpression(iifeBlock);
+    Node iifeCall = astFactory.createCall(iife, AstFactory.type(classNode));
+    iifeCall.srcrefTreeIfMissing(classNode);
+    classNode.replaceWith(iifeCall);
+    iifeBlock.addChildToFront(classNode);
+    t.reportCodeChange(iifeBlock);
+    t.reportCodeChange();
+  }
+
   @Override
   public void visit(NodeTraversal t, Node n, Node parent) {
     if (n.isClass()) {
@@ -134,6 +164,20 @@ public final class RewriteClassMembers implements NodeTraversal.Callback, Compil
     rewriteStaticMembers(t, currClassRecord);
   }
 
+  private void moveImpureComputedNames(Node member, Node classNode, NodeTraversal t) {
+    checkArgument(member.isComputedFieldDef() || member.isComputedProp());
+    Node computedName = member.getFirstChild();
+    if (NodeUtil.canBeSideEffected(computedName)) {
+      CompilerInput input = t.getInput();
+      String genName = TEMP_COMP_KEY + uniqueIdSupplier.getUniqueId(input);
+      Node newName = astFactory.createName(genName, AstFactory.type(computedName));
+      computedName.replaceWith(newName);
+      Node hoistedName = astFactory.createSingleConstNameDeclaration(genName, computedName);
+      hoistedName.srcrefTreeIfMissing(computedName);
+      hoistedName.insertBefore(NodeUtil.getEnclosingStatement(classNode));
+    }
+  }
+
   /** Rewrites and moves all instance fields */
   private void rewriteInstanceMembers(NodeTraversal t, ClassRecord record) {
     Deque<Node> instanceMembers = record.instanceMembers;
@@ -141,11 +185,35 @@ public final class RewriteClassMembers implements NodeTraversal.Callback, Compil
     if (instanceMembers.isEmpty()) {
       return;
     }
-
     ctorCreator.synthesizeClassConstructorIfMissing(t, record.classNode);
     Node ctor = NodeUtil.getEs6ClassConstructorMemberFunctionDef(record.classNode);
     Node ctorBlock = ctor.getFirstChild().getLastChild();
     Node insertionPoint = findInitialInstanceInsertionPoint(ctorBlock);
+
+    Node newFunc = astFactory.createEmptyFunction(AstFactory.type(record.classNode));
+    CompilerInput input = t.getInput();
+    String newMembFuncName = TEMP_MEM_FUNC_NAME + uniqueIdSupplier.getUniqueId(input);
+    Node newMembFunc = astFactory.createMemberFunctionDef(newMembFuncName, newFunc);
+    Node newFunBlock = NodeUtil.getFunctionBody(newFunc);
+    Node funProp =
+        astFactory.createGetProp(
+            astFactory.createThis(AstFactory.type(record.classNode)),
+            newMembFuncName,
+            AstFactory.type(record.classNode));
+    Node funCall = astFactory.exprResult(astFactory.createCallWithUnknownType(funProp));
+    funCall.srcrefTreeIfMissing(record.classNode);
+    newMembFunc.srcrefTreeIfMissing(record.classNode);
+    t.reportCodeChange(newFunBlock);
+
+    if (insertionPoint == ctorBlock) {
+      // insert the new function call at the beginning of the block, no super
+      ctorBlock.addChildToFront(funCall);
+    } else {
+      funCall.insertAfter(insertionPoint);
+    }
+
+    Node classMembers = NodeUtil.getClassMembers(record.classNode);
+    classMembers.addChildToFront(newMembFunc);
 
     while (!instanceMembers.isEmpty()) {
       Node instanceMember = instanceMembers.pop();
@@ -153,15 +221,26 @@ public final class RewriteClassMembers implements NodeTraversal.Callback, Compil
 
       Node thisNode = astFactory.createThisForEs6ClassMember(instanceMember);
 
-      Node transpiledNode = convNonCompFieldToGetProp(thisNode, instanceMember.detach());
-      if (insertionPoint == ctorBlock) { // insert the field at the beginning of the block, no super
-        ctorBlock.addChildToFront(transpiledNode);
-      } else {
-        transpiledNode.insertAfter(insertionPoint);
+      Node transpiledNode;
+      switch (instanceMember.getToken()) {
+        case MEMBER_FIELD_DEF:
+          transpiledNode = convNonCompFieldToGetProp(thisNode, instanceMember.detach());
+
+          break;
+        case COMPUTED_FIELD_DEF:
+          transpiledNode = convCompFieldToGetElem(thisNode, instanceMember.detach());
+          break;
+        default:
+          throw new IllegalStateException(String.valueOf(instanceMember));
       }
+      newFunBlock.addChildToFront(transpiledNode);
       t.reportCodeChange(); // we moved the field from the class body
       t.reportCodeChange(ctorBlock); // to the constructor, so we need both
     }
+  }
+
+  private Set<String> getNamesUsedInCtors() {
+    return new HashSet<>();
   }
 
   /** Rewrites and moves all static blocks and fields */
@@ -180,12 +259,16 @@ public final class RewriteClassMembers implements NodeTraversal.Callback, Compil
       switch (staticMember.getToken()) {
         case BLOCK:
           if (!NodeUtil.getVarsDeclaredInBranch(staticMember).isEmpty()) {
-            t.report(staticMember, TranspilationUtil.CANNOT_CONVERT_YET, "Var in static block");
+            transpiledNode = putBlockInIIFE(t, staticMember);
+            break;
           }
           transpiledNode = staticMember.detach();
           break;
         case MEMBER_FIELD_DEF:
           transpiledNode = convNonCompFieldToGetProp(nameToUse, staticMember.detach());
+          break;
+        case COMPUTED_FIELD_DEF:
+          transpiledNode = convCompFieldToGetElem(nameToUse, staticMember.detach());
           break;
         default:
           throw new IllegalStateException(String.valueOf(staticMember));
@@ -193,6 +276,27 @@ public final class RewriteClassMembers implements NodeTraversal.Callback, Compil
       transpiledNode.insertAfter(record.classInsertionPoint);
       t.reportCodeChange();
     }
+  }
+
+  /**
+   * Used to convert all static blocks with vars to an arrow function IIFE to prevent overwriting
+   * shadowed vars from static class block,
+   *
+   * @return the IIFE <code><pre>
+   *   var x = 2;
+   *   class C {
+   *     static {
+   *       var x = 3;
+   *     }
+   *   }
+   * </pre></code>
+   */
+  private Node putBlockInIIFE(NodeTraversal t, Node staticBlock) {
+    Node iife = astFactory.createZeroArgArrowFunctionForExpression(staticBlock.detach());
+    Node iifeCall = astFactory.createCallWithUnknownType(iife);
+    iifeCall.srcrefTreeIfMissing(staticBlock);
+    t.reportCodeChange(staticBlock);
+    return astFactory.exprResult(iifeCall);
   }
 
   /**
@@ -212,6 +316,24 @@ public final class RewriteClassMembers implements NodeTraversal.Callback, Compil
             ? astFactory.createAssignStatement(getProp, fieldValue.detach())
             : astFactory.exprResult(getProp);
     result.srcrefTreeIfMissing(noncomputedField);
+    return result;
+  }
+
+  /**
+   * Creates a node that represents receiver[key] = value; where the key and value comes from the
+   * non-computed field
+   */
+  private Node convCompFieldToGetElem(Node receiver, Node computedField) {
+    checkArgument(computedField.isComputedFieldDef());
+    checkArgument(computedField.getParent() == null, computedField);
+    checkArgument(receiver.getParent() == null, receiver);
+    Node getElem = astFactory.createGetElem(receiver, computedField.getFirstChild().detach());
+    Node fieldValue = computedField.getLastChild();
+    Node result =
+        (fieldValue != null)
+            ? astFactory.createAssignStatement(getElem, fieldValue.detach())
+            : astFactory.exprResult(getElem);
+    result.srcrefTreeIfMissing(computedField);
     return result;
   }
 
@@ -245,6 +367,10 @@ public final class RewriteClassMembers implements NodeTraversal.Callback, Compil
   @Nullable
   private Node getStatementDeclaringClass(Node classNode, Node classNameNode) {
 
+    if (classNameNode == null) {
+      // cannot extract static fields without a class name for assigning
+      return null;
+    }
     if (NodeUtil.isClassDeclaration(classNode)) {
       // `class C {}` -> can use `C.staticMember` to extract static fields
       checkState(NodeUtil.isStatement(classNode));
@@ -272,12 +398,14 @@ public final class RewriteClassMembers implements NodeTraversal.Callback, Compil
   /**
    * Accumulates information about different classes while going down the AST in shouldTraverse()
    */
-  private static final class ClassRecord {
+  private static final class ClassRecord implements NodeUtil.Visitor {
     boolean cannotConvert = false;
     final Deque<Node> instanceMembers =
         new ArrayDeque<>(); // instance computed + noncomputed fields
     final Deque<Node> staticMembers =
         new ArrayDeque<>(); // static blocks + computed + noncomputed fields
+    final Set<String> memberReferredNames = new HashSet<>();
+    @Nullable Scope classMemberScope = null;
     final Node classNode;
     final String classNameString;
     final Node classInsertionPoint;
@@ -300,6 +428,19 @@ public final class RewriteClassMembers implements NodeTraversal.Callback, Compil
     private void recordStaticBlock(Node block) {
       checkArgument(NodeUtil.isClassStaticBlock(block));
       staticMembers.push(block);
+    }
+
+    /** Collects all of the names referenced inside a class member */
+    @Override
+    public void visit(Node node) {
+      if (!node.isName()) {
+        return;
+      }
+      String name = node.getString();
+      checkNotNull(classMemberScope);
+      if (classMemberScope.hasSlot(name)) {
+        memberReferredNames.add(name);
+      }
     }
   }
 }
